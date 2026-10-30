@@ -53,7 +53,11 @@ export function slugifyCategory(label: string): string {
 
 export function resolveCategories(catalog: CategoryCatalog, usedIds: string[] = []): VaultCategory[] {
   const removed = new Set(catalog.removed);
-  const list: VaultCategory[] = BUILTIN.filter((entry) => !removed.has(entry.id));
+  const overrides = new Map(catalog.added.filter((entry) => !removed.has(entry.id)).map((entry) => [entry.id, entry.label]));
+  const list: VaultCategory[] = BUILTIN.filter((entry) => !removed.has(entry.id)).map((entry) => ({
+    ...entry,
+    label: overrides.get(entry.id) ?? entry.label,
+  }));
   const known = new Set(list.map((entry) => entry.id));
   for (const entry of catalog.added) {
     if (removed.has(entry.id) || known.has(entry.id)) continue;

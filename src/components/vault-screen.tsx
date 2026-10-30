@@ -1,4 +1,4 @@
-import { ChevronDown, Copy, IdCard, LogOut, Mic, Plus, Search, Settings, Tags } from "lucide-react";
+import { ChevronDown, Copy, Home, Mic, Moon, Plus, Power, Search, Settings, Sun, Tags } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { signOut } from "@/lib/auth/client";
@@ -24,7 +24,8 @@ import {
   writeLockMinutes,
   writeCategoryCatalog,
 } from "@/lib/vault/memory";
-import { countByCategory, matchesQuery } from "@/lib/vault/search";
+import { matchesQuery } from "@/lib/vault/search";
+import { applyTheme, readTheme, type ThemeName } from "@/lib/theme";
 import { compteLabel, type AccountFields, type VaultItem } from "@/lib/vault/types";
 
 const MASK = "••••••••••••";
@@ -72,9 +73,12 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
   const [catalog, setCatalog] = useState<CategoryCatalog>({ removed: [], added: [] });
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [categoryName, setCategoryName] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState("");
   const [categoryBusy, setCategoryBusy] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [openIds, setOpenIds] = useState<Record<string, boolean>>({});
+  const [openCats, setOpenCats] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState<VaultItem | "new" | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -93,6 +97,17 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
   const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
+    if (!settingsOpen) {
+      delete document.documentElement.dataset.vaultOverlay;
+      return;
+    }
+    document.documentElement.dataset.vaultOverlay = "settings";
+    return () => {
+      delete document.documentElement.dataset.vaultOverlay;
+    };
+  }, [settingsOpen]);
+
+  useEffect(() => {
     setMounted(true);
     setLockMinutes(readLockMinutes());
     setDemoIds(readDemoIds(userId));
@@ -106,6 +121,14 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
 
   const dek = mounted ? getDek() : null;
   void tick;
+
+  useEffect(() => {
+    if (!dek) return;
+    document.documentElement.dataset.vaultDash = "1";
+    return () => {
+      delete document.documentElement.dataset.vaultDash;
+    };
+  }, [dek]);
 
   const lock = useCallback(() => {
     speechRef.current?.stop();
@@ -204,10 +227,6 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     () => resolveCategories(catalog, (items ?? []).map((item) => item.category)),
     [catalog, items],
   );
-  const counts = useMemo(
-    () => countByCategory(items ?? [], categories.map((entry) => entry.id)),
-    [items, categories],
-  );
   const visible = useMemo(() => {
     return (items ?? []).filter((item) => {
       if (category !== "all" && item.category !== category) return false;
@@ -249,6 +268,11 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     setOpenIds((current) => {
       const next = { ...current };
       for (const item of matches) next[item.id] = true;
+      return next;
+    });
+    setOpenCats((current) => {
+      const next = { ...current };
+      for (const item of matches) next[item.category] = true;
       return next;
     });
     const target = matches[0]?.id;
@@ -379,6 +403,29 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     setCategory(id);
   }
 
+  function saveRename(event: React.FormEvent) {
+    event.preventDefault();
+    if (!editingId) return;
+    const label = editingLabel.trim().slice(0, 32);
+    if (!label) {
+      toast("Indiquez un nom de catégorie.");
+      return;
+    }
+    const taken = categories.some(
+      (entry) => entry.id !== editingId && entry.label.toLowerCase() === label.toLowerCase(),
+    );
+    if (taken) {
+      toast("Cette catégorie existe déjà.");
+      return;
+    }
+    persistCatalog({
+      removed: catalog.removed,
+      added: [...catalog.added.filter((entry) => entry.id !== editingId), { id: editingId, label }],
+    });
+    setEditingId(null);
+    setEditingLabel("");
+  }
+
   async function removeCategory(id: string) {
     const nextCategories = categories.filter((entry) => entry.id !== id);
     if (nextCategories.length === 0) {
@@ -491,36 +538,68 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
   const confirmItem = items?.find((item) => item.id === confirmId) ?? null;
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-4 py-4 sm:py-10">
-      <header className="z-10 -mx-4 border-b border-line bg-bg px-4 pb-3 pt-1 sm:sticky sm:top-0 sm:pb-4 sm:pt-2">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
+    <main className="vault-shell mx-auto w-full max-w-3xl px-4 py-4 sm:py-10">
+      <button
+        type="button"
+        className="corner-btn signout-btn"
+        aria-label="Déconnexion et verrouillage"
+        disabled={signingOut}
+        onClick={() => void onSignOut()}
+      >
+        <Power size={20} aria-hidden="true" />
+      </button>
+      <button type="button" className="corner-btn docs-corner" aria-label="Documents" onClick={() => setDocsOpen(true)}>
+        <span className="doc-ico" aria-hidden="true" />
+      </button>
+      <button type="button" className="corner-btn settings-corner" aria-label="Réglages" onClick={() => setSettingsOpen(true)}>
+        <Settings size={20} aria-hidden="true" />
+      </button>
+      <aside className="vault-dash" aria-label="Tableau de bord">
+        <p className="vault-dash-title">Tableau de bord</p>
+        <button
+          type="button"
+          className="btn btn-secondary vault-dash-btn"
+          onClick={() => {
+            setDocsOpen(false);
+            setSettingsOpen(false);
+            setCatalogOpen(false);
+            setCategory("all");
+            setQuery("");
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          }}
+        >
+          <Home size={18} aria-hidden="true" />
+          Retour à l'accueil
+        </button>
+        <button type="button" className="btn btn-secondary vault-dash-btn" onClick={() => setSettingsOpen(true)}>
+          <Settings size={18} aria-hidden="true" />
+          Réglages
+        </button>
+        <DashThemeButton />
+        <button type="button" className="btn btn-secondary vault-dash-btn" onClick={() => setDocsOpen(true)}>
+          <span className="doc-ico" aria-hidden="true" />
+          Documents
+        </button>
+        <button type="button" className="btn btn-secondary vault-dash-btn" disabled={signingOut} onClick={() => void onSignOut()}>
+          <Power size={18} aria-hidden="true" />
+          {signingOut ? "Déconnexion…" : "Déconnexion"}
+        </button>
+      </aside>
+      <div className="vault-body">
+      <header className="vault-head z-10 -mx-4 border-b border-line bg-bg px-4 pb-3 sm:sticky sm:top-0 sm:pb-4 sm:pt-2">
+        <div className="vault-brand flex min-w-0 items-center gap-3">
             <Mark />
             <div className="min-w-0">
-              <h1 className="font-display text-2xl tracking-tight sm:text-3xl">MELVAULT</h1>
-              <p className="mt-1 truncate text-sm text-muted tabular-nums">
-                {items ? compteLabel(items.length) : "Chargement…"}
-                {email ? <span className="text-subtle"> · {email}</span> : null}
+              <h1 className="vault-word">MELVAULT</h1>
+              <p className="vault-count">
+                {items
+                  ? items.length <= 1
+                    ? `${items.length} mot de passe enregistré pour ton compte`
+                    : `${items.length} mots de passe enregistrés pour ton compte`
+                  : "Chargement…"}
               </p>
             </div>
           </div>
-          <div className="header-actions">
-            <div className="action-row">
-              <button type="button" className="btn btn-secondary" onClick={() => setSettingsOpen(true)}>
-                <Settings size={14} aria-hidden="true" />
-                Réglages
-              </button>
-              <button type="button" className="btn btn-secondary" disabled={signingOut} onClick={() => void onSignOut()}>
-                <LogOut size={14} aria-hidden="true" />
-                {signingOut ? "…" : "Déconnexion/Verrouillage"}
-              </button>
-            </div>
-            <button type="button" className="btn btn-secondary" onClick={() => setDocsOpen(true)}>
-              <IdCard size={14} aria-hidden="true" />
-              Documents
-            </button>
-          </div>
-        </div>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-subtle" size={18} aria-hidden="true" />
@@ -628,26 +707,6 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
       ) : (
       <>
       <div className="cat-grid">
-        <button type="button" className="chip chip-cat" aria-pressed={category === "all"} onClick={() => setCategory("all")}>
-          Tous
-          <span className="tabular-nums">{items?.length ?? 0}</span>
-        </button>
-        {categories.map((entry) => {
-          const Icon = entry.icon;
-          return (
-            <button
-              key={entry.id}
-              type="button"
-              className="chip chip-cat"
-              aria-pressed={category === entry.id}
-              onClick={() => setCategory(entry.id)}
-            >
-              <Icon size={16} aria-hidden="true" />
-              <span className="min-w-0 truncate">{entry.label}</span>
-              <span className="tabular-nums">{counts[entry.id] ?? 0}</span>
-            </button>
-          );
-        })}
         <button
           type="button"
           className="btn btn-secondary cat-manage"
@@ -662,19 +721,59 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
 
       {catalogOpen ? (
         <div className="cat-editor">
-          <p className="text-sm font-medium">Catégories</p>
-          <ul className="mt-2 space-y-1">
+          <p className="cat-editor-head text-sm font-medium">Catégories</p>
+          <ul className="cat-editor-list mt-2 space-y-1">
             {categories.map((entry) => (
               <li key={entry.id} className="flex items-center justify-between gap-2 text-sm">
-                <span className="min-w-0 truncate">{entry.label}</span>
-                <button
-                  type="button"
-                  className="btn-quiet"
-                  disabled={categoryBusy}
-                  onClick={() => void removeCategory(entry.id)}
-                >
-                  Retirer
-                </button>
+                {editingId === entry.id ? (
+                  <form className="flex min-w-0 flex-1 gap-2" onSubmit={saveRename}>
+                    <input
+                      className="field"
+                      value={editingLabel}
+                      maxLength={32}
+                      aria-label={`Nouveau nom pour ${entry.label}`}
+                      onChange={(event) => setEditingLabel(event.target.value)}
+                    />
+                    <button type="submit" className="btn btn-primary shrink-0" disabled={categoryBusy}>
+                      Enregistrer
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-quiet shrink-0"
+                      onClick={() => {
+                        setEditingId(null);
+                        setEditingLabel("");
+                      }}
+                    >
+                      Annuler
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <span className="min-w-0 truncate">{entry.label}</span>
+                    <span className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        className="btn-quiet"
+                        disabled={categoryBusy}
+                        onClick={() => {
+                          setEditingId(entry.id);
+                          setEditingLabel(entry.label);
+                        }}
+                      >
+                        Modifier
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-quiet"
+                        disabled={categoryBusy}
+                        onClick={() => void removeCategory(entry.id)}
+                      >
+                        Retirer
+                      </button>
+                    </span>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -737,14 +836,26 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
             const group = visible.filter((item) => item.category === entry.id);
             if (group.length === 0) return null;
             const Icon = entry.icon;
+            const catOpen = openCats[entry.id] === true;
             return (
               <section key={entry.id}>
-                <h2 className="mb-2 flex items-center gap-2 text-sm font-medium text-muted">
-                  <Icon size={16} aria-hidden="true" />
+                <button
+                  type="button"
+                  className="cat-title mb-2 flex w-full items-center gap-2 text-left"
+                  aria-expanded={catOpen}
+                  onClick={() => setOpenCats((current) => ({ ...current, [entry.id]: !current[entry.id] }))}
+                >
+                  <Icon size={19} aria-hidden="true" />
                   {entry.label}
                   <span className="tabular-nums">{group.length}</span>
-                </h2>
-                <div className="space-y-1.5">
+                  <ChevronDown
+                    size={18}
+                    aria-hidden="true"
+                    className={`ml-auto shrink-0 text-muted ${catOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+                {catOpen ? (
+                <div className="vault-accounts space-y-1.5">
                   {group.map((item) => {
                     const open = openIds[item.id] === true;
                     return (
@@ -836,6 +947,7 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
                     );
                   })}
                 </div>
+                ) : null}
               </section>
             );
           })}
@@ -915,7 +1027,29 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
           </div>
         </div>
       ) : null}
+      </div>
     </main>
+  );
+}
+
+function DashThemeButton() {
+  const [theme, setTheme] = useState<ThemeName>("dark");
+  useEffect(() => {
+    setTheme(readTheme());
+  }, []);
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button
+      type="button"
+      className="btn btn-secondary vault-dash-btn"
+      onClick={() => {
+        applyTheme(next);
+        setTheme(next);
+      }}
+    >
+      {theme === "dark" ? <Sun size={18} aria-hidden="true" /> : <Moon size={18} aria-hidden="true" />}
+      Mode clair / sombre
+    </button>
   );
 }
 

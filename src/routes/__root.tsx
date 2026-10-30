@@ -2,6 +2,7 @@ import { createRootRoute, HeadContent, Outlet, Scripts } from "@tanstack/react-r
 import { Toaster } from "sonner";
 import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
+import { ThemeToggle } from "@/components/ui";
 import appCss from "../styles.css?url";
 
 export const Route = createRootRoute({
@@ -14,7 +15,9 @@ export const Route = createRootRoute({
         name: "description",
         content: "Coffre personnel chiffré pour vos comptes et mots de passe.",
       },
-      { name: "theme-color", content: "#e7eef6" },
+      { name: "theme-color", content: "#10284a" },
+      { name: "application-name", content: "MELVAULT" },
+      { name: "apple-mobile-web-app-title", content: "MELVAULT" },
     ],
     links: [
       { rel: "icon", href: "/favicon.ico", sizes: "32x32" },
@@ -26,7 +29,7 @@ export const Route = createRootRoute({
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Outfit:wght@400;500;600&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;800&display=swap",
       },
       { rel: "stylesheet", href: appCss },
       { rel: "manifest", href: "/__grok/manifest.webmanifest" },
@@ -36,9 +39,16 @@ export const Route = createRootRoute({
   component: () => (
     <html lang="fr" suppressHydrationWarning>
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              '(function(){try{if(localStorage.getItem("coffre.theme")==="light")document.documentElement.dataset.theme="light";}catch(e){}})();',
+          }}
+        />
         <HeadContent />
       </head>
       <body>
+        <ThemeToggle />
         <PreviewHostBridge />
         <AuthProvider>
           <Outlet />

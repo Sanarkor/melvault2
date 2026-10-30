@@ -7,6 +7,7 @@ export type VaultDocument = {
   docType: DocType;
   title: string;
   image: string;
+  mime?: string;
 };
 
 export type StoredDocument = VaultDocument & { id: string };
@@ -23,8 +24,119 @@ export function isVaultDocument(value: unknown): value is VaultDocument {
     typeof row.title === "string" &&
     typeof row.image === "string" &&
     row.image.length > 32 &&
-    row.image.length < 500_000
+    row.image.length < 2_900_000 &&
+    (row.mime === undefined || (typeof row.mime === "string" && row.mime.length < 120))
   );
+}
+
+const FILE_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  csv: "text/csv",
+  txt: "text/plain",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  svg: "image/svg+xml",
+};
+
+export const DOCUMENT_ACCEPT = [
+  "image/*",
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  ".ppt",
+  ".pptx",
+  ".odt",
+  ".ods",
+  ".csv",
+  ".txt",
+  ".heic",
+  ".heif",
+  ".tif",
+  ".tiff",
+  ".svg",
+].join(",");
+
+function extensionOf(name: string): string {
+  const match = name.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] ?? "";
+}
+
+export function documentMime(file: File): string | null {
+  const fromName = FILE_TYPES[extensionOf(file.name)];
+  const fromType = file.type.toLowerCase();
+  if (fromType.startsWith("image/")) return fromType;
+  if (fromName) return fromName;
+  if (fromType && FILE_TYPES[extensionOf(`x.${fromType.split("/").pop()}`)]) return fromType;
+  if (
+    fromType === "application/pdf" ||
+    fromType.includes("word") ||
+    fromType.includes("excel") ||
+    fromType.includes("spreadsheet") ||
+    fromType.includes("presentation")
+  ) {
+    return fromType;
+  }
+  return null;
+}
+
+export const MAX_DOCUMENTS = 10;
+export const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (file.size > MAX_FILE_BYTES) {
+      reject(new Error("Fichier trop lourd (2 Mo maximum)."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const payload = result.slice(result.indexOf(",") + 1);
+      if (!payload || payload.length < 32) {
+        reject(new Error("Fichier vide."));
+        return;
+      }
+      if (payload.length > 2_800_000) {
+        reject(new Error("Fichier trop lourd (2 Mo maximum)."));
+        return;
+      }
+      resolve(payload);
+    };
+    reader.onerror = () => reject(new Error("Fichier illisible."));
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function prepareDocumentFile(file: File): Promise<{ image: string; mime: string }> {
+  const mime = documentMime(file);
+  if (!mime) throw new Error("Format non accepté.");
+  if (mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/heic" && mime !== "image/heif") {
+    try {
+      return { image: await compressDocumentImage(file), mime: "image/jpeg" };
+    } catch {
+      /* photo illisible par le navigateur : on garde le fichier d'origine s'il est assez léger */
+    }
+  }
+  return { image: await fileToBase64(file), mime };
 }
 
 export function compressDocumentImage(file: File): Promise<string> {

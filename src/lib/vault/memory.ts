@@ -99,6 +99,29 @@ export function clearRememberedLogin(): void {
   localStorage.removeItem(REMEMBER_KEY);
 }
 
+const REMEMBER_EMAIL_KEY = "coffre.rememberEmail";
+
+export function readRememberedEmail(): string | null {
+  try {
+    const raw = localStorage.getItem(REMEMBER_EMAIL_KEY);
+    if (!raw) return null;
+    const email = raw.trim().toLowerCase();
+    return email.includes("@") ? email : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeRememberedEmail(email: string): void {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return;
+  localStorage.setItem(REMEMBER_EMAIL_KEY, normalized);
+}
+
+export function clearRememberedEmail(): void {
+  localStorage.removeItem(REMEMBER_EMAIL_KEY);
+}
+
 const CATALOG_PREFIX = "coffre.categories.";
 
 export function readCategoryCatalog(userId: string): { removed: string[]; added: { id: string; label: string }[] } {

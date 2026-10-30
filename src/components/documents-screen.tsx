@@ -1,14 +1,17 @@
-import { useEffect, useId, useState } from "react";
-import { ArrowLeft, IdCard } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import { Alert } from "@/components/ui";
 import { deleteItems, upsertItem } from "@/lib/vault/api";
+import { readBiometricLogin, verifyBiometric } from "@/lib/vault/biometric";
 import { encryptJson } from "@/lib/vault/crypto";
 import {
   checkDocumentPin,
   clearDocumentPin,
-  compressDocumentImage,
+  DOCUMENT_ACCEPT,
   hasDocumentPin,
+  MAX_DOCUMENTS,
+  prepareDocumentFile,
   saveDocumentPin,
   type StoredDocument,
 } from "@/lib/vault/documents";
@@ -16,7 +19,7 @@ import {
 export function DocumentsScreen({
   dek,
   userId,
-  email: _email,
+  email,
   docs,
   onChange,
   onClose,
@@ -37,6 +40,10 @@ export function DocumentsScreen({
   const [creatingPin, setCreatingPin] = useState(() => !hasDocumentPin(userId));
   const [pinError, setPinError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const accountBio = readBiometricLogin();
+  const bioReady = Boolean(
+    accountBio && email && accountBio.email === email.trim().toLowerCase(),
+  );
 
   useEffect(() => {
     const hide = () => {
@@ -51,25 +58,35 @@ export function DocumentsScreen({
 
   async function saveDocs(files: File[]) {
     if (files.length === 0) return;
+    const room = MAX_DOCUMENTS - docs.length;
+    if (room <= 0) {
+      toast("10 documents maximum.");
+      return;
+    }
+    const batch = files.slice(0, room);
+    const skipped = files.length - batch.length;
     setBusy(true);
     const added: StoredDocument[] = [];
     let failed = 0;
     try {
-      for (const file of files) {
+      let lastError = "";
+      for (const file of batch) {
         try {
-          const image = await compressDocumentImage(file);
+          const prepared = await prepareDocumentFile(file);
           const record = {
             kind: "document" as const,
             docType: "other" as const,
             title: (file.name.replace(/\.[^.]+$/, "") || "Document").slice(0, 40),
-            image,
+            image: prepared.image,
+            mime: prepared.mime,
           };
           const sealed = await encryptJson(dek, record);
           const id = crypto.randomUUID();
           await upsertItem({ data: { id, iv: sealed.iv, ciphertext: sealed.ct, hasPassword: false } });
           added.push({ id, ...record });
-        } catch {
+        } catch (caught) {
           failed += 1;
+          lastError = caught instanceof Error ? caught.message : "";
         }
       }
       if (added.length > 0) {
@@ -77,8 +94,9 @@ export function DocumentsScreen({
         setUnlockedId(null);
       }
       if (failed === 0) toast(added.length > 1 ? `${added.length} documents enregistrés` : "Document enregistré");
-      else if (added.length === 0) toast("Enregistrement impossible.");
+      else if (added.length === 0) toast(lastError || "Enregistrement impossible.");
       else toast(`${added.length} enregistrés, ${failed} ignorés.`);
+      if (skipped > 0) toast("10 documents maximum.");
     } finally {
       setBusy(false);
     }
@@ -87,12 +105,13 @@ export function DocumentsScreen({
   async function saveDoc(file: File, existingId?: string, title?: string) {
     setBusy(true);
     try {
-      const image = await compressDocumentImage(file);
+      const prepared = await prepareDocumentFile(file);
       const record = {
         kind: "document" as const,
         docType: "other" as const,
         title: (title ?? (file.name.replace(/\.[^.]+$/, "") || "Document")).slice(0, 40),
-        image,
+        image: prepared.image,
+        mime: prepared.mime,
       };
       const sealed = await encryptJson(dek, record);
       const id = existingId ?? crypto.randomUUID();
@@ -182,6 +201,24 @@ export function DocumentsScreen({
     }
   }
 
+  async function unlockWithBiometric() {
+    if (!accountBio || !bioReady || creatingPin) return;
+    setBusy(true);
+    setPinError(null);
+    try {
+      await verifyBiometric(accountBio.credentialId);
+      if (pendingId) setUnlockedId(pendingId);
+      setPinOpen(false);
+      setPendingId(null);
+      setPin("");
+      setPinConfirm("");
+    } catch {
+      setPinError("Empreinte refusée pour ce compte.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function resetDocuments() {
     setBusy(true);
     try {
@@ -211,14 +248,14 @@ export function DocumentsScreen({
       </button>
       <h2 className="mt-4 font-display text-2xl tracking-tight">Documents</h2>
       <p className="mt-2 text-sm text-muted">
-        Un seul code déverrouille toutes les photos. L'image reste floue tant qu'elle n'est pas déverrouillée.
+        Un seul code déverrouille tous les documents. 2 Mo par fichier, 10 documents maximum.
       </p>
       <label className="btn btn-secondary page-btn mt-4">
         Ajouter un document
         <input
           className="sr-only"
           type="file"
-          accept="image/*"
+          accept={DOCUMENT_ACCEPT}
           multiple
           disabled={busy}
           onChange={(event) => {
@@ -231,7 +268,7 @@ export function DocumentsScreen({
       <button type="button" className="btn btn-secondary page-btn mt-2" disabled={busy} onClick={() => setResetOpen(true)}>
         Réinitialisation totale des documents
       </button>
-      <div className="mt-5 space-y-4">
+      <div className="doc-board mt-5 space-y-4">
         {docs.map((doc) => (
           <DocumentCard
             key={doc.id}
@@ -257,7 +294,7 @@ export function DocumentsScreen({
               {creatingPin ? "Choisissez un code à 6 chiffres" : "Code de déverrouillage"}
             </p>
             <p className="mt-2 text-center text-sm text-muted">
-              {creatingPin ? "Ce code servira pour toutes les photos." : "Le même code ouvre toutes les photos."}
+              {creatingPin ? "Ce code servira pour toutes les photos." : "Le code ou l'empreinte du compte ouvre toutes les photos."}
             </p>
             <PinDigits value={pin} label="Code à 6 chiffres" />
             {creatingPin ? <PinDigits value={pinConfirm} label="Confirmer le code" /> : null}
@@ -276,6 +313,17 @@ export function DocumentsScreen({
               </button>
             </div>
             {pinError ? <Alert>{pinError}</Alert> : null}
+            {!creatingPin && bioReady ? (
+              <button
+                type="button"
+                className="doc-bio"
+                aria-label="Déverrouiller avec l'empreinte du compte"
+                disabled={busy}
+                onClick={() => void unlockWithBiometric()}
+              >
+                <span className="bio-mark" aria-hidden="true" />
+              </button>
+            ) : null}
             <div className="mt-4 flex gap-2">
               <button type="submit" className="btn btn-primary flex-1" disabled={busy}>
                 {busy ? "Vérification…" : creatingPin ? "Enregistrer" : "Déverrouiller"}
@@ -310,10 +358,27 @@ export function DocumentsScreen({
 }
 
 function PinDigits({ value, label }: { value: string; label: string }) {
+  const previous = useRef("");
+  const [visibleIndex, setVisibleIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (value.length > previous.current.length) {
+      const index = value.length - 1;
+      setVisibleIndex(index);
+      const timer = window.setTimeout(() => {
+        setVisibleIndex((current) => (current === index ? null : current));
+      }, 550);
+      previous.current = value;
+      return () => window.clearTimeout(timer);
+    }
+    previous.current = value;
+    setVisibleIndex(null);
+  }, [value]);
+
   return (
     <div className="pin-slots" aria-label={label}>
       {Array.from({ length: 6 }, (_, index) => (
-        <span key={index}>{value[index] ?? ""}</span>
+        <span key={index}>{value[index] ? (visibleIndex === index ? value[index] : "*") : ""}</span>
       ))}
     </div>
   );
@@ -342,10 +407,14 @@ function DocumentCard({
   return (
     <article className="rounded-card border border-line bg-surface p-4">
       <div className="flex items-center gap-2">
-        <IdCard size={16} aria-hidden="true" />
+        <span className="doc-ico" aria-hidden="true" />
         <h3 className="text-sm font-medium">{label}</h3>
       </div>
-      {doc ? <ShieldedImage image={doc.image} sharp={sharp} label={label} /> : <p className="mt-3 text-sm text-muted">Aucune photo.</p>}
+      {doc ? (
+        <DocumentPreview image={doc.image} mime={doc.mime || "image/jpeg"} sharp={sharp} label={label} />
+      ) : (
+        <p className="mt-3 text-sm text-muted">Aucun fichier.</p>
+      )}
       <div className="mt-3 flex flex-wrap gap-2">
         <label className="btn btn-secondary page-btn">
           {doc ? "Remplacer" : "Ajouter une photo"}
@@ -353,7 +422,7 @@ function DocumentCard({
             id={inputId}
             className="sr-only"
             type="file"
-            accept="image/*"
+            accept={DOCUMENT_ACCEPT}
             disabled={busy}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -377,23 +446,49 @@ function DocumentCard({
   );
 }
 
-function ShieldedImage({ image, sharp, label }: { image: string; sharp: boolean; label: string }) {
+function DocumentPreview({
+  image,
+  mime,
+  sharp,
+  label,
+}: {
+  image: string;
+  mime: string;
+  sharp: boolean;
+  label: string;
+}) {
   const [url, setUrl] = useState<string | null>(null);
+  const visual = mime.startsWith("image/");
+  const pdf = mime === "application/pdf";
 
   useEffect(() => {
     try {
       const binary = atob(image);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-      const next = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+      const next = URL.createObjectURL(new Blob([bytes], { type: mime || "application/octet-stream" }));
       setUrl(next);
       return () => URL.revokeObjectURL(next);
     } catch {
       setUrl(null);
     }
-  }, [image]);
+  }, [image, mime]);
 
   if (!url) return <p className="mt-3 text-sm text-muted">Aperçu indisponible.</p>;
+
+  if (!visual && !pdf) {
+    return (
+      <div className={`doc-file mt-3 ${sharp ? "" : "is-locked"}`}>
+        <p className="text-sm font-medium">{fileLabel(mime)}</p>
+        <p className="mt-1 text-sm text-muted">{sharp ? label : "Verrouillé"}</p>
+        {sharp ? (
+          <a className="btn btn-secondary page-btn mt-3" href={url} target="_blank" rel="noreferrer">
+            Ouvrir
+          </a>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -401,8 +496,21 @@ function ShieldedImage({ image, sharp, label }: { image: string; sharp: boolean;
       onContextMenu={(event) => event.preventDefault()}
       onDragStart={(event) => event.preventDefault()}
     >
-      <img src={url} alt={sharp ? label : ""} draggable={false} />
+      {visual ? (
+        <img src={url} alt={sharp ? label : ""} draggable={false} />
+      ) : (
+        <iframe title={sharp ? label : "Document"} src={sharp ? url : undefined} />
+      )}
       <div className="doc-shield-cover" />
     </div>
   );
+}
+
+function fileLabel(mime: string): string {
+  if (mime.includes("word") || mime.includes("opendocument.text")) return "Document Word";
+  if (mime.includes("sheet") || mime.includes("excel") || mime === "text/csv") return "Tableur";
+  if (mime.includes("presentation")) return "Présentation";
+  if (mime === "application/pdf") return "PDF";
+  if (mime.startsWith("image/")) return "Image";
+  return "Fichier";
 }

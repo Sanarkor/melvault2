@@ -259,7 +259,7 @@ export const insertItems = createServerFn({ method: "POST" })
   });
 
 function requireCipher(value: unknown): string {
-  if (typeof value !== "string" || value.length < 8 || value.length > 500_000) invalid();
+  if (typeof value !== "string" || value.length < 8 || value.length > 4_500_000) invalid();
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) invalid();
   return value;
 }

@@ -151,14 +151,34 @@ export function stripInstallParams(url) {
   return rest ? `${path}?${rest}` : path;
 }
 
-export function renderInstallPageHtml(template, { host, url } = {}) {
+function resolveInstallName(hostHeader, options = {}) {
+  const fromSite = String(options.site?.installName ?? "").trim();
+  if (fromSite) return fromSite.slice(0, 40);
+  const fromFile = readInstallName(options.cwd);
+  if (fromFile) return fromFile;
+  const fromTitle = String(options.site?.title ?? "").trim();
+  if (fromTitle) return fromTitle.slice(0, 40);
+  return appNameFromHost(hostHeader);
+}
+
+export function renderInstallPageHtml(template, { host, url, cwd, site } = {}) {
   return String(template)
-    .replaceAll("{{APP_NAME}}", escapeHtml(appNameFromHost(host)))
+    .replaceAll("{{APP_NAME}}", escapeHtml(resolveInstallName(host, { cwd, site })))
     .replaceAll("{{APP_URL}}", escapeHtml(stripInstallParams(url)));
 }
 
-export function renderWebManifest(hostHeader) {
-  const name = appNameFromHost(hostHeader);
+function readInstallName(cwd = process.cwd()) {
+  try {
+    const site = JSON.parse(readFileSync(join(cwd, OG_SITE_REL_PATH), "utf8"));
+    const name = String(site.installName ?? "").trim();
+    return name.slice(0, 40);
+  } catch {
+    return "";
+  }
+}
+
+export function renderWebManifest(hostHeader, options = {}) {
+  const name = resolveInstallName(hostHeader, options);
   return JSON.stringify(
     {
       name,
@@ -167,13 +187,26 @@ export function renderWebManifest(hostHeader) {
       start_url: "/",
       scope: "/",
       display: "standalone",
-      background_color: "#000000",
-      theme_color: "#000000",
+      background_color: "#10284a",
+      theme_color: "#10284a",
       icons: [
         {
           src: "/__grok/icon-180.png",
           sizes: "180x180",
           type: "image/png",
+          purpose: "any",
+        },
+        {
+          src: "/icon-192.png",
+          sizes: "192x192",
+          type: "image/png",
+          purpose: "any",
+        },
+        {
+          src: "/icon-512.png",
+          sizes: "512x512",
+          type: "image/png",
+          purpose: "any",
         },
       ],
     },

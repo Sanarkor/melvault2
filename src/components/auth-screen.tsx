@@ -9,7 +9,14 @@ import {
   unlockVault,
 } from "@/lib/vault/actions";
 import { countVaultUsers, getMeta } from "@/lib/vault/api";
-import { setDek, writeDemoIds, clearRememberedLogin, readRememberedLogin, writeRememberedLogin } from "@/lib/vault/memory";
+import { setDek, writeDemoIds, clearRememberedLogin, readRememberedLogin, writeRememberedLogin, readRememberedEmail, writeRememberedEmail, clearRememberedEmail } from "@/lib/vault/memory";
+import {
+  clearBiometricLogin,
+  readBiometricLogin,
+  registerBiometric,
+  verifyBiometric,
+  writeBiometricLogin,
+} from "@/lib/vault/biometric";
 
 type Mode = "login" | "signup";
 
@@ -32,13 +39,26 @@ export function AuthScreen({
   const [notice, setNotice] = useState<string | null>(null);
   const [userCount, setUserCount] = useState<number | null>(null);
   const [remember, setRemember] = useState(false);
+  const [rememberEmail, setRememberEmail] = useState(false);
+  const [bioSaved, setBioSaved] = useState(false);
 
   useEffect(() => {
     const saved = readRememberedLogin();
+    const savedEmail = readRememberedEmail();
+    if (savedEmail) {
+      setEmail(savedEmail);
+      setRememberEmail(true);
+    }
     if (!saved) return;
     setEmail(saved.email);
     setPassword(saved.password);
     setRemember(true);
+    setRememberEmail(true);
+  }, []);
+
+  useEffect(() => {
+    const saved = readBiometricLogin();
+    setBioSaved(Boolean(saved));
   }, []);
 
   useEffect(() => {
@@ -61,7 +81,18 @@ export function AuthScreen({
     setNotice(null);
   }
 
-  async function finishLogin(address: string, secret: string) {
+  function biometricError(caught: unknown): string {
+    if (caught instanceof DOMException) {
+      if (caught.name === "NotAllowedError") return "Empreinte ou visage refusé.";
+      if (caught.name === "NotSupportedError" || caught.name === "SecurityError") {
+        return "Empreinte ou visage indisponible sur cet appareil.";
+      }
+    }
+    const message = errorText(caught);
+    return message === "Une erreur est survenue." ? "Empreinte ou visage refusé." : message;
+  }
+
+  async function finishLogin(address: string, secret: string, credentialId?: string | null) {
     holdSession();
     await signInEmail(address.trim(), secret);
     const meta = await getMeta();
@@ -74,9 +105,53 @@ export function AuthScreen({
     }
     if (remember) writeRememberedLogin(address, secret);
     else clearRememberedLogin();
+    if (rememberEmail) writeRememberedEmail(address);
+    else clearRememberedEmail();
+    if (credentialId) {
+      writeBiometricLogin(address, secret, credentialId);
+      setBioSaved(true);
+    } else if (credentialId === null) {
+      clearBiometricLogin();
+      setBioSaved(false);
+    }
     setPassword("");
     releaseSession();
     await navigate({ to: "/" });
+  }
+
+  async function onBiometric() {
+    setPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = readBiometricLogin();
+      const typed = email.trim().toLowerCase();
+      if (saved) {
+        if (typed !== saved.email) {
+          setError(
+            typed
+              ? "Empreinte refusée : elle n'est pas liée à cet e-mail."
+              : "Empreinte refusée : indiquez d'abord l'e-mail du compte.",
+          );
+          return;
+        }
+        await verifyBiometric(saved.credentialId);
+        await finishLogin(typed, saved.password, saved.credentialId);
+        return;
+      }
+      const normalized = email.trim().toLowerCase();
+      if (!normalized || !password) {
+        setError("Saisissez l'e-mail et le mot de passe, puis appuyez de nouveau.");
+        return;
+      }
+      const credentialId = await registerBiometric(normalized);
+      await finishLogin(email, password, credentialId);
+    } catch (caught) {
+      releaseSession();
+      setError(caught instanceof DOMException ? biometricError(caught) : errorText(caught));
+    } finally {
+      setPending(false);
+    }
   }
 
   async function onLogin(event: React.FormEvent) {
@@ -85,7 +160,10 @@ export function AuthScreen({
     setError(null);
     setNotice(null);
     try {
-      await finishLogin(email, password);
+      const normalized = email.trim().toLowerCase();
+      const existing = readBiometricLogin();
+      const credentialId = existing && existing.email === normalized ? existing.credentialId : undefined;
+      await finishLogin(email, password, credentialId);
     } catch (caught) {
       releaseSession();
       setError(errorText(caught));
@@ -200,9 +278,10 @@ export function AuthScreen({
   }
 
   return (
-    <main className="screen flex min-h-dvh max-w-lg flex-col justify-start sm:justify-center">
+    <main className="screen auth-fit flex min-h-dvh max-w-lg flex-col justify-start sm:justify-center">
       <Brand large subtitle="Vos mots de passe restent chiffrés sur cet appareil." />
-      <div className="mt-8 flex gap-2">
+      <div className="auth-panel">
+      <div className="auth-tabs flex gap-2">
         <button
           type="button"
           className="chip"
@@ -216,7 +295,7 @@ export function AuthScreen({
         </button>
       </div>
 
-      <form className="mt-6 space-y-4" onSubmit={(event) => void (mode === "login" ? onLogin(event) : onSignup(event))}>
+      <form className="auth-form" onSubmit={(event) => void (mode === "login" ? onLogin(event) : onSignup(event))}>
           <Field label="Adresse e-mail">
             <input
               className="field"
@@ -227,6 +306,21 @@ export function AuthScreen({
               onChange={(event) => setEmail(event.target.value)}
             />
           </Field>
+          {mode === "login" ? (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={rememberEmail}
+                onChange={(event) => {
+                  const on = event.target.checked;
+                  setRememberEmail(on);
+                  if (!on) clearRememberedEmail();
+                }}
+              />
+              <span>Mémoriser l'adresse e-mail</span>
+            </label>
+          ) : null}
           <SecretField
             label="Mot de passe"
             value={password}
@@ -252,19 +346,27 @@ export function AuthScreen({
                   if (!on) clearRememberedLogin();
                 }}
               />
-              <span>
-                Mémoriser le mot de passe de connexion
-                <span className="mt-0.5 block text-muted">
-                  À vos risques et périls. Il reste sur cet appareil et peut être lu par quelqu'un qui l'utilise.
-                </span>
-              </span>
+              <span>Mémoriser le mot de passe de connexion</span>
             </label>
           ) : null}
-          {notice ? <p className="rounded-control bg-surface-2 px-3 py-2 text-sm">{notice}</p> : null}
           {error ? <Alert>{error}</Alert> : null}
           <button className="btn btn-primary w-full" type="submit" disabled={pending}>
             {pending ? "Patientez…" : mode === "login" ? "Se connecter" : "Créer le coffre"}
           </button>
+          {mode === "login" ? (
+            <button
+              type="button"
+              className="bio-btn"
+              disabled={pending}
+              aria-label="Connexion biométrique"
+              onClick={() => void onBiometric()}
+            >
+              <BioMark />
+            </button>
+          ) : null}
+          {mode === "login" && !bioSaved ? (
+            <p className="text-sm text-muted">La première fois, saisissez l'e-mail et le mot de passe, puis ce bouton.</p>
+          ) : null}
           {mode === "login" ? (
             <div className="flex items-baseline justify-between gap-3">
               <button
@@ -282,6 +384,11 @@ export function AuthScreen({
             </div>
           ) : null}
         </form>
+      </div>
     </main>
   );
+}
+
+function BioMark() {
+  return <span className="bio-mark" aria-hidden="true" />;
 }

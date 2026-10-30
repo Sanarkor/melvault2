@@ -1,6 +1,33 @@
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Moon, Sun } from "lucide-react";
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { strengthOf } from "@/lib/vault/password";
+import { applyTheme, readTheme, type ThemeName } from "@/lib/theme";
+
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<ThemeName>("dark");
+
+  useEffect(() => {
+    const current = readTheme();
+    setTheme(current);
+    applyTheme(current);
+  }, []);
+
+  const next = theme === "dark" ? "light" : "dark";
+
+  return (
+    <button
+      type="button"
+      className="corner-btn theme-toggle"
+      aria-label={next === "light" ? "Mode clair" : "Mode sombre"}
+      onClick={() => {
+        applyTheme(next);
+        setTheme(next);
+      }}
+    >
+      {theme === "dark" ? <Sun size={20} aria-hidden="true" /> : <Moon size={20} aria-hidden="true" />}
+    </button>
+  );
+}
 
 export function Mark({ large = false }: { large?: boolean }) {
   return (
@@ -22,7 +49,7 @@ export function Brand({ subtitle, large = false }: { subtitle?: string; large?: 
         subtitle ? <p className="text-sm text-muted">{subtitle}</p> : null
       ) : (
         <div className="min-w-0">
-          <p className="font-display text-2xl leading-none tracking-tight">MELVAULT</p>
+          <p className="vault-word">MELVAULT</p>
           {subtitle ? <p className="mt-1 text-sm text-muted">{subtitle}</p> : null}
         </div>
       )}
@@ -129,10 +156,12 @@ export function Dialog({
   title,
   onClose,
   children,
+  closeAnywhereOnPhone = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  closeAnywhereOnPhone?: boolean;
 }) {
   useEffect(() => {
     const previous = document.body.style.overflow;
@@ -154,7 +183,11 @@ export function Dialog({
         aria-modal="true"
         aria-label={title}
         className="modal-panel"
-        onMouseDown={(event) => event.stopPropagation()}
+        onMouseDown={(event) => {
+          const phone = window.matchMedia("(max-width: 639px)").matches;
+          if (closeAnywhereOnPhone && phone) return;
+          event.stopPropagation();
+        }}
       >
         {children}
       </div>
