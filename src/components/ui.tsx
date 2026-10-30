@@ -156,12 +156,10 @@ export function Dialog({
   title,
   onClose,
   children,
-  closeAnywhereOnPhone = false,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  closeAnywhereOnPhone?: boolean;
 }) {
   useEffect(() => {
     const previous = document.body.style.overflow;
@@ -183,11 +181,7 @@ export function Dialog({
         aria-modal="true"
         aria-label={title}
         className="modal-panel"
-        onMouseDown={(event) => {
-          const phone = window.matchMedia("(max-width: 639px)").matches;
-          if (closeAnywhereOnPhone && phone) return;
-          event.stopPropagation();
-        }}
+        onMouseDown={(event) => event.stopPropagation()}
       >
         {children}
       </div>

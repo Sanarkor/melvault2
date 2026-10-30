@@ -7,6 +7,7 @@ import { DocumentsScreen } from "@/components/documents-screen";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { Alert, Brand, Mark, PageSkeleton, SecretField } from "@/components/ui";
 import { createVault, errorText, unlockVault } from "@/lib/vault/actions";
+import { readBiometricLogin, verifyBiometric } from "@/lib/vault/biometric";
 import { deleteItems, getMeta, listItems, upsertItem, type VaultMeta } from "@/lib/vault/api";
 import { resolveCategories, slugifyCategory, type CategoryCatalog } from "@/lib/vault/categories";
 import { decryptJson, openAccount, sealAccount } from "@/lib/vault/crypto";
@@ -300,6 +301,27 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     }
   }
 
+  async function onUnlockBiometric() {
+    if (!meta || !email) return;
+    const saved = readBiometricLogin();
+    if (!saved || saved.email !== email.trim().toLowerCase()) {
+      setUnlockError("Cette empreinte n'est pas liée à ce compte.");
+      return;
+    }
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      await verifyBiometric(saved.credentialId);
+      const next = await unlockVault(saved.password, meta);
+      setUnlockPassword("");
+      setDek(next);
+    } catch {
+      setUnlockError("Empreinte refusée pour ce compte.");
+    } finally {
+      setUnlocking(false);
+    }
+  }
+
   async function onSetup(event: React.FormEvent) {
     event.preventDefault();
     if (setupPassword.length < 10) {
@@ -497,7 +519,7 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
         ) : meta ? (
           <form className="mt-8 space-y-4" onSubmit={(event) => void onUnlock(event)}>
             <p className="text-sm text-muted">
-              Le coffre est verrouillé. Saisissez votre mot de passe pour déchiffrer vos comptes sur cet appareil.
+              Le coffre est verrouillé. Saisissez votre mot de passe, ou l'empreinte de ce compte, pour le rouvrir.
             </p>
             <SecretField
               label="Mot de passe"
@@ -510,6 +532,17 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
             <button type="submit" className="btn btn-primary w-full" disabled={unlocking}>
               {unlocking ? "Déchiffrement…" : "Déverrouiller"}
             </button>
+            {readBiometricLogin()?.email === email?.trim().toLowerCase() ? (
+              <button
+                type="button"
+                className="bio-btn"
+                disabled={unlocking}
+                aria-label="Déverrouiller avec l'empreinte du compte"
+                onClick={() => void onUnlockBiometric()}
+              >
+                <span className="bio-mark" aria-hidden="true" />
+              </button>
+            ) : null}
             <button type="button" className="btn btn-secondary w-full" disabled={signingOut} onClick={() => void onSignOut()}>
               {signingOut ? "Déconnexion…" : "Déconnexion"}
             </button>

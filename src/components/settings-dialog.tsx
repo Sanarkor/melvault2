@@ -184,7 +184,7 @@ export function SettingsDialog({
   }
 
   return (
-    <Dialog title="Réglages" onClose={onClose} closeAnywhereOnPhone>
+    <Dialog title="Réglages" onClose={onClose}>
       <div className="space-y-6">
         <div className="flex items-start justify-between gap-3">
           <h2 className="font-display text-2xl tracking-tight">Réglages</h2>
