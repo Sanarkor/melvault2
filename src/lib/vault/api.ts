@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
-import { KDF_ITERATIONS } from "@/lib/vault/crypto";
+import { assertDbAttempt, clearDbAttempt, markDbAttempt } from "@/lib/vault/attempts.server";
 import { normalizeRecoveryCode } from "@/lib/vault/recovery";
 
 type MetaRow = {
@@ -27,32 +27,8 @@ export type StoredItem = { id: string; iv: string; ciphertext: string; hasPasswo
 
 const FAIL_MESSAGE = "Code de récupération incorrect, ou aucun coffre pour cette adresse.";
 
-type Bucket = { fails: number; until: number };
-const rlHost = globalThis as typeof globalThis & { __coffreRecoveryRl?: Map<string, Bucket> };
-
-function buckets(): Map<string, Bucket> {
-  rlHost.__coffreRecoveryRl ??= new Map();
-  return rlHost.__coffreRecoveryRl;
-}
-
-function assertRecoveryAllowed(email: string): void {
-  const bucket = buckets().get(email);
-  if (bucket && bucket.until > Date.now() && bucket.fails >= 8) {
-    throw new Error("Trop de tentatives. Réessayez dans quelques minutes.");
-  }
-  if (bucket && bucket.until <= Date.now()) buckets().delete(email);
-}
-
-function markRecoveryFail(email: string): void {
-  const map = buckets();
-  const now = Date.now();
-  const bucket = map.get(email);
-  if (!bucket || bucket.until <= now) map.set(email, { fails: 1, until: now + 15 * 60_000 });
-  else bucket.fails += 1;
-}
-
-function clearRecoveryFail(email: string): void {
-  buckets().delete(email);
+function recoveryBucket(email: string): string {
+  return `recovery:${email}`;
 }
 
 function invalid(): never {
@@ -101,11 +77,24 @@ function asPassword(value: unknown): string {
   return value;
 }
 
-function asRecoveryCode(value: unknown): string {
+function asRecoveryProof(value: unknown): string {
   if (typeof value !== "string") invalid();
+  const trimmed = value.trim().toLowerCase();
+  if (/^[a-f0-9]{64}$/.test(trimmed)) return trimmed;
   const code = normalizeRecoveryCode(value);
   if (code.length < 20 || code.length > 40) throw new Error(FAIL_MESSAGE);
   return code;
+}
+
+function asVerifier(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value.trim().toLowerCase())) invalid();
+  return value.trim().toLowerCase();
+}
+
+function asIters(value: unknown): number {
+  const iters = Number(value);
+  if (iters !== 210_000 && iters !== 600_000) invalid();
+  return iters;
 }
 
 function mapMeta(row: MetaRow): VaultMeta {
@@ -151,8 +140,9 @@ type SaveMetaInput = {
   dekPassword: string;
   recoverySalt: string;
   dekRecovery: string;
-  recoveryCode: string;
+  recoveryVerifier: string;
   recoveryHint: string;
+  kdfIters: number;
 };
 
 export const saveMeta = createServerFn({ method: "POST" })
@@ -162,20 +152,21 @@ export const saveMeta = createServerFn({ method: "POST" })
     dekPassword: asPack(input?.dekPassword),
     recoverySalt: asSalt(input?.recoverySalt),
     dekRecovery: asPack(input?.dekRecovery),
-    recoveryCode: asRecoveryCode(input?.recoveryCode),
+    recoveryVerifier: asVerifier(input?.recoveryVerifier),
     recoveryHint: asPack(input?.recoveryHint),
+    kdfIters: asIters(input?.kdfIters),
   }))
   .handler(async ({ context, data }) => {
     const { hashPassword } = await import("better-auth/crypto");
-    const recoveryHash = await hashPassword(data.recoveryCode);
+    const recoveryHash = await hashPassword(data.recoveryVerifier);
     const sql = await db();
     await sql`
       insert into vault_meta (
         user_id, kdf_iters, kdf_salt, dek_password, recovery_iters, recovery_salt,
         dek_recovery, recovery_hash, recovery_hint
       ) values (
-        ${context.userId}, ${KDF_ITERATIONS}, ${data.kdfSalt}, ${data.dekPassword},
-        ${KDF_ITERATIONS}, ${data.recoverySalt}, ${data.dekRecovery}, ${recoveryHash},
+        ${context.userId}, ${data.kdfIters}, ${data.kdfSalt}, ${data.dekPassword},
+        ${data.kdfIters}, ${data.recoverySalt}, ${data.dekRecovery}, ${recoveryHash},
         ${data.recoveryHint}
       )
       on conflict (user_id) do nothing
@@ -185,12 +176,19 @@ export const saveMeta = createServerFn({ method: "POST" })
 
 export const updatePasswordWrap = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((input: { dekPassword: string }) => ({ dekPassword: asPack(input?.dekPassword) }))
+  .validator((input: { dekPassword: string; kdfSalt?: string; kdfIters?: number }) => ({
+    dekPassword: asPack(input?.dekPassword),
+    kdfSalt: input?.kdfSalt ? asSalt(input.kdfSalt) : null,
+    kdfIters: input?.kdfIters == null ? null : asIters(input.kdfIters),
+  }))
   .handler(async ({ context, data }) => {
     const sql = await db();
     const rows = await sql<{ user_id: string }>`
       update vault_meta
-      set dek_password = ${data.dekPassword}, updated_at = now()
+      set dek_password = ${data.dekPassword},
+          kdf_salt = coalesce(${data.kdfSalt}, kdf_salt),
+          kdf_iters = coalesce(${data.kdfIters}, kdf_iters),
+          updated_at = now()
       where user_id = ${context.userId}
       returning user_id
     `;
@@ -312,12 +310,12 @@ type RecoveryMaterial = {
 };
 
 export const openRecovery = createServerFn({ method: "POST" })
-  .validator((input: { email: string; recoveryCode: string }) => ({
+  .validator((input: { email: string; recoveryProof: string }) => ({
     email: asEmail(input?.email),
-    recoveryCode: asRecoveryCode(input?.recoveryCode),
+    recoveryProof: asRecoveryProof(input?.recoveryProof),
   }))
   .handler(async ({ data }): Promise<RecoveryMaterial> => {
-    assertRecoveryAllowed(data.email);
+    await assertDbAttempt(recoveryBucket(data.email));
     const sql = await db();
     const rows = await sql<{
       user_id: string;
@@ -336,12 +334,12 @@ export const openRecovery = createServerFn({ method: "POST" })
       limit 1
     `;
     const row = rows[0];
-    const ok = await recoveryMatches(row?.recovery_hash ?? null, data.recoveryCode);
+    const ok = await recoveryMatches(row?.recovery_hash ?? null, data.recoveryProof);
     if (!ok || !row?.kdf_salt || !row.recovery_salt || !row.dek_recovery) {
-      markRecoveryFail(data.email);
+      await markDbAttempt(recoveryBucket(data.email));
       throw new Error(FAIL_MESSAGE);
     }
-    clearRecoveryFail(data.email);
+    await clearDbAttempt(recoveryBucket(data.email));
     return {
       kdfIters: Number(row.kdf_iters),
       kdfSalt: row.kdf_salt,
@@ -352,14 +350,27 @@ export const openRecovery = createServerFn({ method: "POST" })
   });
 
 export const finishRecovery = createServerFn({ method: "POST" })
-  .validator((input: { email: string; recoveryCode: string; newPassword: string; dekPassword: string }) => ({
-    email: asEmail(input?.email),
-    recoveryCode: asRecoveryCode(input?.recoveryCode),
-    newPassword: asPassword(input?.newPassword),
-    dekPassword: asPack(input?.dekPassword),
-  }))
+  .validator(
+    (input: {
+      email: string;
+      recoveryProof: string;
+      nextVerifier: string;
+      newPassword: string;
+      dekPassword: string;
+      kdfSalt: string;
+      kdfIters: number;
+    }) => ({
+      email: asEmail(input?.email),
+      recoveryProof: asRecoveryProof(input?.recoveryProof),
+      nextVerifier: asVerifier(input?.nextVerifier),
+      newPassword: asPassword(input?.newPassword),
+      dekPassword: asPack(input?.dekPassword),
+      kdfSalt: asSalt(input?.kdfSalt),
+      kdfIters: asIters(input?.kdfIters),
+    }),
+  )
   .handler(async ({ data }) => {
-    assertRecoveryAllowed(data.email);
+    await assertDbAttempt(recoveryBucket(data.email));
     const sql = await db();
     const rows = await sql<{ user_id: string; recovery_hash: string | null }>`
       select u.id as user_id, m.recovery_hash
@@ -369,13 +380,14 @@ export const finishRecovery = createServerFn({ method: "POST" })
       limit 1
     `;
     const row = rows[0];
-    const ok = await recoveryMatches(row?.recovery_hash ?? null, data.recoveryCode);
+    const ok = await recoveryMatches(row?.recovery_hash ?? null, data.recoveryProof);
     if (!ok || !row) {
-      markRecoveryFail(data.email);
+      await markDbAttempt(recoveryBucket(data.email));
       throw new Error(FAIL_MESSAGE);
     }
     const { hashPassword } = await import("better-auth/crypto");
     const passwordHash = await hashPassword(data.newPassword);
+    const recoveryHash = await hashPassword(data.nextVerifier);
     const updated = await sql.query<{ updated: number }>(
       `with acct as (
          update "account"
@@ -385,7 +397,12 @@ export const finishRecovery = createServerFn({ method: "POST" })
        ),
        meta as (
          update vault_meta
-         set dek_password = $1, updated_at = now()
+         set dek_password = $1,
+             kdf_salt = $4,
+             kdf_iters = $5,
+             recovery_iters = $5,
+             recovery_hash = $6,
+             updated_at = now()
          where user_id in (select "userId" from acct)
          returning user_id
        ),
@@ -395,9 +412,9 @@ export const finishRecovery = createServerFn({ method: "POST" })
          returning "id"
        )
        select (select count(*)::int from meta) as updated`,
-      [data.dekPassword, row.user_id, passwordHash],
+      [data.dekPassword, row.user_id, passwordHash, data.kdfSalt, data.kdfIters, recoveryHash],
     );
     if (!Number(updated[0]?.updated)) throw new Error("Réinitialisation impossible.");
-    clearRecoveryFail(data.email);
+    await clearDbAttempt(recoveryBucket(data.email));
     return { ok: true as const };
   });

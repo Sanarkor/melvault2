@@ -4,7 +4,6 @@ import {
   createDek,
   deriveAesKey,
   encryptJson,
-  KDF_ITERATIONS,
   parsePack,
   randomBytes,
   readExportFile,
@@ -16,6 +15,7 @@ import {
 } from "@/lib/vault/crypto";
 import { DEMO_ACCOUNTS } from "@/lib/vault/demo";
 import { rememberBearer } from "@/lib/vault/memory";
+import { KDF_ITERATIONS_V2, authSecret, recoveryVerifier } from "@/lib/vault/secrets";
 import { normalizeRecoveryCode, generateRecoveryCode } from "@/lib/vault/recovery";
 import type { AccountFields } from "@/lib/vault/types";
 import {
@@ -83,10 +83,26 @@ async function establishSession(token: string | null | undefined): Promise<void>
 
 export async function signUpEmail(email: string, password: string): Promise<{ id: string }> {
   const name = email.split("@")[0]?.slice(0, 40) || "Coffre";
-  const result = await emails().signUp.email({ email, password, name });
+  const secret = await authSecret(email, password);
+  const result = await emails().signUp.email({ email, password: secret, name });
   if (result.error || !result.data?.user) throw new Error(mapAuthError(result.error?.message));
   await establishSession(result.data.token);
   return result.data.user;
+}
+
+export async function signInWithMaster(email: string, password: string): Promise<{ id: string }> {
+  const secret = await authSecret(email, password);
+  try {
+    return await signInEmail(email, secret);
+  } catch (first) {
+    try {
+      const legacy = await signInEmail(email, password);
+      await changeLoginPassword(password, secret);
+      return legacy;
+    } catch {
+      throw first;
+    }
+  }
 }
 
 export async function signInEmail(email: string, password: string): Promise<{ id: string }> {
@@ -116,11 +132,11 @@ export async function createVault(password: string): Promise<{
   const dek = await createDek();
   const kdfSalt = randomBytes(16);
   const recoverySalt = randomBytes(16);
-  const passKek = await deriveAesKey(password, kdfSalt, KDF_ITERATIONS, keyUsages);
+  const passKek = await deriveAesKey(password, kdfSalt, KDF_ITERATIONS_V2, keyUsages);
   const recKek = await deriveAesKey(
     normalizeRecoveryCode(recoveryCode),
     recoverySalt,
-    KDF_ITERATIONS,
+    KDF_ITERATIONS_V2,
     keyUsages,
   );
   const dekPassword = await wrapDek(dek, passKek);
@@ -132,8 +148,9 @@ export async function createVault(password: string): Promise<{
       dekPassword: JSON.stringify(dekPassword),
       recoverySalt: b64(recoverySalt),
       dekRecovery: JSON.stringify(dekRecovery),
-      recoveryCode,
+      recoveryVerifier: await recoveryVerifier(recoveryCode),
       recoveryHint: JSON.stringify(hint),
+      kdfIters: KDF_ITERATIONS_V2,
     },
   });
   const items = [];
@@ -156,11 +173,15 @@ export async function unlockVault(password: string, meta: VaultMeta): Promise<Cr
 
 export async function rewrapWithPassword(
   dek: CryptoKey,
-  meta: VaultMeta,
   password: string,
-): Promise<string> {
-  const kek = await deriveAesKey(password, unb64(meta.kdfSalt), meta.kdfIters, keyUsages);
-  return JSON.stringify(await wrapDek(dek, kek));
+): Promise<{ dekPassword: string; kdfSalt: string; kdfIters: number }> {
+  const salt = randomBytes(16);
+  const kek = await deriveAesKey(password, salt, KDF_ITERATIONS_V2, keyUsages);
+  return {
+    dekPassword: JSON.stringify(await wrapDek(dek, kek)),
+    kdfSalt: b64(salt),
+    kdfIters: KDF_ITERATIONS_V2,
+  };
 }
 
 export async function resetWithRecovery(
@@ -168,7 +189,15 @@ export async function resetWithRecovery(
   recoveryCode: string,
   newPassword: string,
 ): Promise<void> {
-  const opened = await openRecovery({ data: { email, recoveryCode } });
+  const verifier = await recoveryVerifier(recoveryCode);
+  let proof = verifier;
+  let opened: Awaited<ReturnType<typeof openRecovery>>;
+  try {
+    opened = await openRecovery({ data: { email, recoveryProof: verifier } });
+  } catch {
+    proof = normalizeRecoveryCode(recoveryCode);
+    opened = await openRecovery({ data: { email, recoveryProof: proof } });
+  }
   let dek: CryptoKey;
   try {
     const kek = await deriveAesKey(
@@ -181,13 +210,27 @@ export async function resetWithRecovery(
   } catch {
     throw new Error("Ce code ne permet pas de déchiffrer le coffre.");
   }
-  const passKek = await deriveAesKey(newPassword, unb64(opened.kdfSalt), opened.kdfIters, keyUsages);
-  const dekPassword = JSON.stringify(await wrapDek(dek, passKek));
-  await finishRecovery({ data: { email, recoveryCode, newPassword, dekPassword } });
+  const wrapped = await rewrapWithPassword(dek, newPassword);
+  const nextAuth = await authSecret(email, newPassword);
+  await finishRecovery({
+    data: {
+      email,
+      recoveryProof: proof,
+      nextVerifier: verifier,
+      newPassword: nextAuth,
+      dekPassword: wrapped.dekPassword,
+      kdfSalt: wrapped.kdfSalt,
+      kdfIters: wrapped.kdfIters,
+    },
+  });
 }
 
-export async function savePasswordWrap(dekPassword: string): Promise<void> {
-  await updatePasswordWrap({ data: { dekPassword } });
+export async function savePasswordWrap(wrapped: {
+  dekPassword: string;
+  kdfSalt: string;
+  kdfIters: number;
+}): Promise<void> {
+  await updatePasswordWrap({ data: wrapped });
 }
 
 export async function exportVault(accounts: AccountFields[], passphrase: string): Promise<string> {

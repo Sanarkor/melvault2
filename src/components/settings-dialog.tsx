@@ -12,7 +12,9 @@ import {
 } from "@/lib/vault/actions";
 import { decryptJson, parsePack, sealAccount } from "@/lib/vault/crypto";
 import { insertItems, type VaultMeta } from "@/lib/vault/api";
-import { rotateRememberedPassword } from "@/lib/vault/memory";
+import { clearBiometricLogin } from "@/lib/vault/biometric";
+import { clearRememberedLogin } from "@/lib/vault/memory";
+import { authSecret } from "@/lib/vault/secrets";
 import type { AccountFields, VaultItem } from "@/lib/vault/types";
 
 export function SettingsDialog({
@@ -24,23 +26,25 @@ export function SettingsDialog({
   onLockNow,
   onClose,
   onImported,
+  email,
   onPasswordWrap,
 }: {
   dek: CryptoKey;
   meta: VaultMeta;
   items: VaultItem[];
+  email: string | null;
   lockMinutes: number;
   onLockMinutes: (minutes: number) => void;
   onLockNow: () => void;
   onClose: () => void;
   onImported: (items: VaultItem[]) => void;
-  onPasswordWrap: (dekPassword: string) => void;
+  onPasswordWrap: (next: { dekPassword: string; kdfSalt: string; kdfIters: number }) => void;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [pendingPassword, setPendingPassword] = useState(false);
-  const [pendingWrap, setPendingWrap] = useState<string | null>(null);
+  const [pendingWrap, setPendingWrap] = useState<{ dekPassword: string; kdfSalt: string; kdfIters: number } | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [exportPass, setExportPass] = useState("");
@@ -84,8 +88,13 @@ export function SettingsDialog({
         return;
       }
       await unlockVault(currentPassword, meta);
-      const wrapped = await rewrapWithPassword(dek, meta, nextPassword);
-      await changeLoginPassword(currentPassword, nextPassword);
+      const wrapped = await rewrapWithPassword(dek, nextPassword);
+      const nextAuth = await authSecret(email ?? "", nextPassword);
+      try {
+        await changeLoginPassword(await authSecret(email ?? "", currentPassword), nextAuth);
+      } catch {
+        await changeLoginPassword(currentPassword, nextAuth);
+      }
       try {
         await savePasswordWrap(wrapped);
         onPasswordWrap(wrapped);
@@ -96,11 +105,12 @@ export function SettingsDialog({
         );
         return;
       }
+      clearRememberedLogin();
+      clearBiometricLogin();
       setCurrentPassword("");
       setNextPassword("");
       setConfirm("");
-      rotateRememberedPassword(currentPassword, nextPassword);
-      toast("Mot de passe de connexion mis à jour");
+      toast("Mot de passe de connexion mis à jour. Enregistrez de nouveau l'empreinte.");
     } catch (caught) {
       setPasswordError(errorText(caught));
     } finally {

@@ -5,18 +5,22 @@ import {
   createVault,
   errorText,
   signInEmail,
+  signInWithMaster,
   signUpEmail,
   unlockVault,
 } from "@/lib/vault/actions";
 import { countVaultUsers, getMeta } from "@/lib/vault/api";
-import { setDek, writeDemoIds, clearRememberedLogin, readRememberedLogin, writeRememberedLogin, readRememberedEmail, writeRememberedEmail, clearRememberedEmail } from "@/lib/vault/memory";
 import {
   clearBiometricLogin,
+  openWithPrf,
   readBiometricLogin,
   registerBiometric,
+  sealWithPrf,
   verifyBiometric,
   writeBiometricLogin,
 } from "@/lib/vault/biometric";
+import { setDek, writeDemoIds, clearRememberedLogin, readRememberedEmail, writeRememberedEmail, clearRememberedEmail } from "@/lib/vault/memory";
+import { authSecret } from "@/lib/vault/secrets";
 
 type Mode = "login" | "signup";
 
@@ -38,22 +42,16 @@ export function AuthScreen({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [userCount, setUserCount] = useState<number | null>(null);
-  const [remember, setRemember] = useState(false);
   const [rememberEmail, setRememberEmail] = useState(false);
   const [bioSaved, setBioSaved] = useState(false);
 
   useEffect(() => {
-    const saved = readRememberedLogin();
+    clearRememberedLogin();
     const savedEmail = readRememberedEmail();
     if (savedEmail) {
       setEmail(savedEmail);
       setRememberEmail(true);
     }
-    if (!saved) return;
-    setEmail(saved.email);
-    setPassword(saved.password);
-    setRemember(true);
-    setRememberEmail(true);
   }, []);
 
   useEffect(() => {
@@ -92,25 +90,60 @@ export function AuthScreen({
     return message === "Une erreur est survenue." ? "Empreinte ou visage refusé." : message;
   }
 
-  async function finishLogin(address: string, secret: string, credentialId?: string | null) {
+  async function sealBiometric(
+    address: string,
+    credentialId: string,
+    prf: Uint8Array | null,
+    prfSalt: string,
+    dek: CryptoKey | null,
+    sessionSecret: string,
+  ) {
+    if (!prf || !dek) {
+      writeBiometricLogin({ email: address, credentialId });
+      setBioSaved(true);
+      return;
+    }
+    const rawDek = new Uint8Array(await crypto.subtle.exportKey("raw", dek));
+    writeBiometricLogin({
+      email: address,
+      credentialId,
+      prfSalt,
+      dekWrap: await sealWithPrf(prf, rawDek),
+      authWrap: await sealWithPrf(prf, new TextEncoder().encode(sessionSecret)),
+    });
+    setBioSaved(true);
+  }
+
+  async function finishLogin(
+    address: string,
+    secret: string,
+    biometric?: { credentialId: string; prf: Uint8Array | null; prfSalt: string } | null,
+  ) {
     holdSession();
-    await signInEmail(address.trim(), secret);
+    const normalized = address.trim().toLowerCase();
+    await signInWithMaster(normalized, secret);
     const meta = await getMeta();
+    let dek: CryptoKey | null = null;
     if (meta) {
       try {
-        setDek(await unlockVault(secret, meta));
+        dek = await unlockVault(secret, meta);
+        setDek(dek);
       } catch {
         setDek(null);
       }
     }
-    if (remember) writeRememberedLogin(address, secret);
-    else clearRememberedLogin();
-    if (rememberEmail) writeRememberedEmail(address);
+    clearRememberedLogin();
+    if (rememberEmail) writeRememberedEmail(normalized);
     else clearRememberedEmail();
-    if (credentialId) {
-      writeBiometricLogin(address, secret, credentialId);
-      setBioSaved(true);
-    } else if (credentialId === null) {
+    if (biometric) {
+      if (biometric.prf && dek) {
+        const sessionSecret = await authSecret(normalized, secret);
+        await sealBiometric(normalized, biometric.credentialId, biometric.prf, biometric.prfSalt, dek, sessionSecret);
+      } else if (!readBiometricLogin()?.dekWrap) {
+        writeBiometricLogin({ email: normalized, credentialId: biometric.credentialId });
+        setBioSaved(true);
+      }
+    } else if (biometric === null) {
       clearBiometricLogin();
       setBioSaved(false);
     }
@@ -135,8 +168,27 @@ export function AuthScreen({
           );
           return;
         }
-        await verifyBiometric(saved.credentialId);
-        await finishLogin(typed, saved.password, saved.credentialId);
+        if (!saved.authWrap || !saved.dekWrap || !saved.prfSalt) {
+          setError("Saisissez le mot de passe. L'empreinte de cet appareil ne garde plus le secret.");
+          return;
+        }
+        const prf = await verifyBiometric(saved.credentialId, saved.prfSalt);
+        if (!prf) {
+          setError("Cet appareil ne peut pas ouvrir le coffre avec l'empreinte seule.");
+          return;
+        }
+        const authBytes = await openWithPrf(prf, saved.authWrap);
+        const sessionSecret = new TextDecoder().decode(authBytes);
+        holdSession();
+        await signInEmail(typed, sessionSecret);
+        const raw = await openWithPrf(prf, saved.dekWrap);
+        setDek(
+          await crypto.subtle.importKey("raw", raw as BufferSource, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]),
+        );
+        if (rememberEmail) writeRememberedEmail(typed);
+        setPassword("");
+        releaseSession();
+        await navigate({ to: "/" });
         return;
       }
       const normalized = email.trim().toLowerCase();
@@ -144,8 +196,8 @@ export function AuthScreen({
         setError("Saisissez l'e-mail et le mot de passe, puis appuyez de nouveau.");
         return;
       }
-      const credentialId = await registerBiometric(normalized);
-      await finishLogin(email, password, credentialId);
+      const enrolled = await registerBiometric(normalized);
+      await finishLogin(email, password, enrolled);
     } catch (caught) {
       releaseSession();
       setError(caught instanceof DOMException ? biometricError(caught) : errorText(caught));
@@ -162,8 +214,11 @@ export function AuthScreen({
     try {
       const normalized = email.trim().toLowerCase();
       const existing = readBiometricLogin();
-      const credentialId = existing && existing.email === normalized ? existing.credentialId : undefined;
-      await finishLogin(email, password, credentialId);
+      const biometric =
+        existing && existing.email === normalized
+          ? { credentialId: existing.credentialId, prf: null, prfSalt: existing.prfSalt ?? "" }
+          : undefined;
+      await finishLogin(email, password, biometric);
     } catch (caught) {
       releaseSession();
       setError(errorText(caught));
@@ -333,21 +388,6 @@ export function AuthScreen({
           ) : null}
           {mode === "signup" ? (
             <p className="text-sm text-muted">10 caractères minimum. Ce mot de passe déverrouille le chiffrement.</p>
-          ) : null}
-          {mode === "login" ? (
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="mt-1"
-                checked={remember}
-                onChange={(event) => {
-                  const on = event.target.checked;
-                  setRemember(on);
-                  if (!on) clearRememberedLogin();
-                }}
-              />
-              <span>Mémoriser le mot de passe de connexion</span>
-            </label>
           ) : null}
           {error ? <Alert>{error}</Alert> : null}
           <button className="btn btn-primary w-full" type="submit" disabled={pending}>

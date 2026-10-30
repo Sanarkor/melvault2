@@ -2,7 +2,6 @@ import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Alert, Brand, Field, SecretField, StrengthMeter } from "@/components/ui";
 import { errorText, resetWithRecovery } from "@/lib/vault/actions";
-import { readRememberedLogin, writeRememberedLogin } from "@/lib/vault/memory";
 
 export const Route = createFileRoute("/mot-de-passe-oublie")({
   component: ForgotPage,
@@ -32,8 +31,6 @@ function ForgotPage() {
     try {
       const normalized = email.trim().toLowerCase();
       await resetWithRecovery(normalized, recoveryCode, password);
-      const saved = readRememberedLogin();
-      if (saved?.email === normalized) writeRememberedLogin(normalized, password);
       await navigate({ to: "/login" });
     } catch (caught) {
       setError(errorText(caught));

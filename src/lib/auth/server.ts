@@ -30,6 +30,8 @@
  * a verified id via `@/lib/auth/middleware`.
  */
 import { betterAuth } from "better-auth";
+import { createAuthMiddleware } from "better-auth/api";
+import { assertDbAttempt, clearDbAttempt, markDbAttempt } from "../vault/attempts.server";
 import { bearer, genericOAuth } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import { getCookie } from "@tanstack/react-start/server";
@@ -215,6 +217,22 @@ export const auth = betterAuth({
 
   // Local email/password — toggled only via `./email-password` (not a plugin).
   ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true } } : {}),
+
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-in/email") return;
+      const email = typeof ctx.body?.email === "string" ? ctx.body.email.trim().toLowerCase() : "";
+      if (!email) return;
+      await assertDbAttempt(`login:${email}`);
+    }),
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-in/email") return;
+      const email = typeof ctx.body?.email === "string" ? ctx.body.email.trim().toLowerCase() : "";
+      if (!email) return;
+      if (ctx.context.newSession) await clearDbAttempt(`login:${email}`);
+      else await markDbAttempt(`login:${email}`);
+    }),
+  },
 
   // `__Host-` prefixed cookies: the browser REFUSES any same-named cookie that
   // carries a `Domain` attribute, so a sibling `*.grok.me` app cannot "toss" a

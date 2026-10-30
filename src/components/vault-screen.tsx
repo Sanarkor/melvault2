@@ -7,18 +7,18 @@ import { DocumentsScreen } from "@/components/documents-screen";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { Alert, Brand, Mark, PageSkeleton, SecretField } from "@/components/ui";
 import { createVault, errorText, unlockVault } from "@/lib/vault/actions";
-import { readBiometricLogin, verifyBiometric } from "@/lib/vault/biometric";
+import { openWithPrf, readBiometricLogin, verifyBiometric } from "@/lib/vault/biometric";
 import { deleteItems, getMeta, listItems, upsertItem, type VaultMeta } from "@/lib/vault/api";
 import { resolveCategories, slugifyCategory, type CategoryCatalog } from "@/lib/vault/categories";
 import { decryptJson, openAccount, sealAccount } from "@/lib/vault/crypto";
 import { isVaultDocument, type StoredDocument } from "@/lib/vault/documents";
 import {
   clearDemoIds,
+  clearRememberedLogin,
   getDek,
   readCategoryCatalog,
   readDemoIds,
   readLockMinutes,
-  readRememberedLogin,
   setDek,
   subscribeUnlock,
   writeDemoIds,
@@ -113,10 +113,7 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     setLockMinutes(readLockMinutes());
     setDemoIds(readDemoIds(userId));
     setCatalog(readCategoryCatalog(userId));
-    const saved = readRememberedLogin();
-    if (saved && email && saved.email === email.trim().toLowerCase()) {
-      setUnlockPassword(saved.password);
-    }
+    clearRememberedLogin();
     return subscribeUnlock(() => setTick((value) => value + 1));
   }, [userId, email]);
 
@@ -141,11 +138,8 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
     setEditing(null);
     setSettingsOpen(false);
     setConfirmId(null);
-    const saved = readRememberedLogin();
-    const remembered =
-      saved && email && saved.email === email.trim().toLowerCase() ? saved.password : "";
-    setUnlockPassword(remembered);
-  }, [email]);
+    setUnlockPassword("");
+  }, []);
 
   useEffect(() => {
     if (!mounted || dek) return;
@@ -308,13 +302,21 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
       setUnlockError("Cette empreinte n'est pas liée à ce compte.");
       return;
     }
+    if (!saved.dekWrap || !saved.prfSalt) {
+      setUnlockError("Saisissez le mot de passe. L'empreinte seule ne peut pas ouvrir ce coffre.");
+      return;
+    }
     setUnlocking(true);
     setUnlockError(null);
     try {
-      await verifyBiometric(saved.credentialId);
-      const next = await unlockVault(saved.password, meta);
+      const prf = await verifyBiometric(saved.credentialId, saved.prfSalt);
+      if (!prf) {
+        setUnlockError("Cet appareil ne peut pas ouvrir le coffre avec l'empreinte seule.");
+        return;
+      }
+      const raw = await openWithPrf(prf, saved.dekWrap);
       setUnlockPassword("");
-      setDek(next);
+      setDek(await crypto.subtle.importKey("raw", raw as BufferSource, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]));
     } catch {
       setUnlockError("Empreinte refusée pour ce compte.");
     } finally {
@@ -1009,6 +1011,7 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
           dek={dek}
           meta={meta}
           items={items ?? []}
+          email={email}
           lockMinutes={lockMinutes}
           onLockMinutes={(minutes) => {
             setLockMinutes(minutes);
@@ -1017,7 +1020,13 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
           onLockNow={lock}
           onClose={() => setSettingsOpen(false)}
           onImported={(added) => setItems((current) => [...(current ?? []), ...added])}
-          onPasswordWrap={(dekPassword) => setMeta((current) => (current ? { ...current, dekPassword } : current))}
+          onPasswordWrap={(next) =>
+            setMeta((current) =>
+              current
+                ? { ...current, dekPassword: next.dekPassword, kdfSalt: next.kdfSalt, kdfIters: next.kdfIters }
+                : current,
+            )
+          }
         />
       ) : null}
 

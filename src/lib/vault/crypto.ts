@@ -1,6 +1,7 @@
 import { normalizeAccount, type AccountFields, type CipherPack } from "@/lib/vault/types";
 
 export const KDF_ITERATIONS = 210_000;
+const EXPORT_ITERATIONS = 600_000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -126,13 +127,13 @@ export async function buildExportFile(
   passphrase: string,
 ): Promise<string> {
   const salt = randomBytes(16);
-  const key = await deriveAesKey(passphrase, salt, KDF_ITERATIONS, ["encrypt"]);
+  const key = await deriveAesKey(passphrase, salt, EXPORT_ITERATIONS, ["encrypt"]);
   const pack = await encryptJson(key, { accounts });
   return JSON.stringify({
     format: "coffre-personnel",
     version: 1,
     kdf: "PBKDF2-SHA256",
-    iterations: KDF_ITERATIONS,
+    iterations: EXPORT_ITERATIONS,
     salt: b64(salt),
     iv: pack.iv,
     ct: pack.ct,
@@ -161,7 +162,7 @@ export async function readExportFile(
     throw new Error("Ce fichier n'est pas un coffre chiffré.");
   }
   const iterations = Number(parsed.iterations);
-  if (!Number.isFinite(iterations) || iterations < 10_000 || iterations > 500_000) {
+  if (!Number.isFinite(iterations) || iterations < 10_000 || iterations > 1_000_000) {
     throw new Error("Fichier invalide.");
   }
   if (typeof parsed.salt !== "string" || typeof parsed.iv !== "string" || typeof parsed.ct !== "string") {
