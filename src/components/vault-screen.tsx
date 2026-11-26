@@ -53,7 +53,22 @@ async function copyValue(value: string, label: string) {
   }
   try {
     await navigator.clipboard.writeText(value);
-    toast(label);
+    toast(`${label} — effacé du presse-papiers dans 30 s`);
+    window.setTimeout(() => {
+      void (async () => {
+        try {
+          const current = await navigator.clipboard.readText();
+          if (current !== value) return;
+        } catch {
+          /* lecture refusée : on efface quand même */
+        }
+        try {
+          await navigator.clipboard.writeText("");
+        } catch {
+          /* page en arrière-plan : le navigateur refuse l'écriture */
+        }
+      })();
+    }, 30_000);
   } catch {
     toast("Copie impossible dans ce navigateur");
   }
@@ -217,6 +232,20 @@ export function VaultScreen({ userId, email }: { userId: string; email: string |
       document.removeEventListener("visibilitychange", onHide);
     };
   }, [dek, lock, lockMinutes]);
+
+  // Un mot de passe affiché se masque tout seul après 20 s, ou dès que l'app passe en arrière-plan.
+  useEffect(() => {
+    if (!Object.values(revealed).some(Boolean)) return;
+    const timer = window.setTimeout(() => setRevealed({}), 20_000);
+    const onHide = () => {
+      if (document.visibilityState !== "visible") setRevealed({});
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [revealed]);
 
   const categories = useMemo(
     () => resolveCategories(catalog, (items ?? []).map((item) => item.category)),

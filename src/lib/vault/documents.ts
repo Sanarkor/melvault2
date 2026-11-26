@@ -209,7 +209,48 @@ export function clearDocumentPin(userId: string): void {
   localStorage.removeItem(PIN_PREFIX + userId);
 }
 
+const PIN_FAIL_PREFIX = "coffre.docpinFails.";
+const PIN_MAX_FAILS = 5;
+const PIN_LOCK_MS = 5 * 60_000;
+
+/** Minutes restantes avant de pouvoir retaper le code, ou 0. */
+export function documentPinLockedFor(userId: string): number {
+  try {
+    const raw = localStorage.getItem(PIN_FAIL_PREFIX + userId);
+    if (!raw) return 0;
+    const { fails, at } = JSON.parse(raw) as { fails?: number; at?: number };
+    if (typeof fails !== "number" || typeof at !== "number" || fails < PIN_MAX_FAILS) return 0;
+    const left = at + PIN_LOCK_MS - Date.now();
+    return left > 0 ? Math.ceil(left / 60_000) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function notePinResult(userId: string, ok: boolean): void {
+  try {
+    if (ok) {
+      localStorage.removeItem(PIN_FAIL_PREFIX + userId);
+      return;
+    }
+    const raw = localStorage.getItem(PIN_FAIL_PREFIX + userId);
+    const prev = raw ? (JSON.parse(raw) as { fails?: number; at?: number }) : {};
+    const expired = typeof prev.at === "number" && Date.now() - prev.at > PIN_LOCK_MS;
+    const fails = (expired ? 0 : Number(prev.fails) || 0) + 1;
+    localStorage.setItem(PIN_FAIL_PREFIX + userId, JSON.stringify({ fails, at: Date.now() }));
+  } catch {
+    /* stockage indisponible */
+  }
+}
+
 export async function checkDocumentPin(userId: string, pin: string): Promise<boolean> {
+  if (documentPinLockedFor(userId) > 0) return false;
+  const ok = await checkDocumentPinRaw(userId, pin);
+  notePinResult(userId, ok);
+  return ok;
+}
+
+async function checkDocumentPinRaw(userId: string, pin: string): Promise<boolean> {
   try {
     const raw = localStorage.getItem(PIN_PREFIX + userId);
     if (!raw) return false;
