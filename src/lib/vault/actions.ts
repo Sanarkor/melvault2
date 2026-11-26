@@ -90,14 +90,39 @@ export async function signUpEmail(email: string, password: string): Promise<{ id
   return result.data.user;
 }
 
+const AUTH_V2_PREFIX = "coffre.authV2.";
+
+function knownV2(email: string): boolean {
+  try {
+    return localStorage.getItem(AUTH_V2_PREFIX + email.trim().toLowerCase()) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markV2(email: string): void {
+  try {
+    localStorage.setItem(AUTH_V2_PREFIX + email.trim().toLowerCase(), "1");
+  } catch {
+    /* stockage indisponible */
+  }
+}
+
 export async function signInWithMaster(email: string, password: string): Promise<{ id: string }> {
   const secret = await authSecret(email, password);
   try {
-    return await signInEmail(email, secret);
+    const user = await signInEmail(email, secret);
+    markV2(email);
+    return user;
   } catch (first) {
+    // Ancien format : le mot de passe maître partait tel quel au serveur. On ne retente
+    // ce chemin que si ce compte n'a jamais été vu au nouveau format sur cet appareil,
+    // sinon chaque faute de frappe enverrait le mot de passe (presque juste) en clair.
+    if (knownV2(email)) throw first;
     try {
       const legacy = await signInEmail(email, password);
       await changeLoginPassword(password, secret);
+      markV2(email);
       return legacy;
     } catch {
       throw first;

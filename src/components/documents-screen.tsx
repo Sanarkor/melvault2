@@ -8,6 +8,7 @@ import { encryptJson } from "@/lib/vault/crypto";
 import {
   checkDocumentPin,
   clearDocumentPin,
+  documentPinLockedFor,
   DOCUMENT_ACCEPT,
   hasDocumentPin,
   MAX_DOCUMENTS,
@@ -188,7 +189,9 @@ export function DocumentsScreen({
         await saveDocumentPin(userId, pin);
         toast("Code enregistré pour tous les documents");
       } else if (!(await checkDocumentPin(userId, pin))) {
-        setPinError("Code incorrect.");
+        const wait = documentPinLockedFor(userId);
+        setPin("");
+        setPinError(wait > 0 ? `Trop d'essais. Réessayez dans ${wait} min.` : "Code incorrect.");
         return;
       }
       if (pendingId) setUnlockedId(pendingId);
